@@ -69,6 +69,61 @@ def render_pattern_tag(kind: str, family: str, color: str) -> None:
     )
 
 
+def format_trace_line(log: str) -> str:
+    lowered = log.lower()
+    if any(k in lowered for k in ("hybrid", "qdrant", "vector", "bm25", "rrf", "search")):
+        icon = "⚡"
+    elif any(k in lowered for k in ("dictionary", "alias", "bypass", "title", "tag")):
+        icon = "🛡️"
+    elif "graph edge" in lowered:
+        icon = "🔗"
+    elif "warehouse" in lowered:
+        icon = "📊"
+    elif any(k in lowered for k in ("unstructured", "slack", "log hit", "ticket")):
+        icon = "💬"
+    else:
+        icon = "•"
+    return f"{icon} {log}"
+
+
+def metric_bar_color(score: float) -> str:
+    if score >= 0.8:
+        return "#1a7f37"
+    if score >= 0.5:
+        return "#bf8700"
+    return "#cf222e"
+
+
+def render_metric_bars(metrics: dict) -> None:
+    engine = metrics.get("engine", "unknown")
+    is_ragas = str(engine).lower().startswith("ragas")
+    badge_bg = "#dafbe1" if is_ragas else "#eaeef2"
+    badge_fg = "#1a7f37" if is_ragas else "#656d76"
+    st.markdown(
+        f"<span style='background:{badge_bg};color:{badge_fg};font-weight:600;"
+        f"padding:0.15rem 0.55rem;border-radius:999px;font-size:0.78rem'>{engine}</span>",
+        unsafe_allow_html=True,
+    )
+    rows = [
+        ("Context precision", float(metrics.get("context_precision", 0.0))),
+        ("Faithfulness", float(metrics.get("faithfulness", 0.0))),
+        ("Answer relevancy", float(metrics.get("answer_relevancy", 0.0))),
+    ]
+    bars_html = []
+    for label, score in rows:
+        pct = int(max(0.0, min(1.0, score)) * 100)
+        color = metric_bar_color(score)
+        bars_html.append(
+            f"<div style='margin:0.45rem 0 0.65rem'>"
+            f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;color:#24292f'>"
+            f"<span>{label}</span><span><strong>{score:.2f}</strong></span></div>"
+            f"<div style='background:#eaeef2;border-radius:6px;height:10px;overflow:hidden'>"
+            f"<div style='width:{pct}%;background:{color};height:10px;border-radius:6px'></div>"
+            f"</div></div>"
+        )
+    st.markdown("".join(bars_html), unsafe_allow_html=True)
+
+
 def render_stepper(steps: list[tuple[str, bool]]) -> None:
     chips = []
     for label, active in steps:
@@ -96,13 +151,14 @@ def render_column(
     st.caption(subtitle)
     st.metric("Latency", f"{latency_ms:.1f} ms", delta=extra_delta)
     st.caption(ROUTE_LABELS.get(result["route"], result["route"]))
-    with st.expander("Architecture trace", expanded=True):
+    with st.expander("Dual-track stream log", expanded=True):
         for log in result["logs"]:
-            st.markdown(f"- {log}")
+            st.markdown(f"- {format_trace_line(log)}")
     st.text_area("Prompt context", value=result["context"], height=240, key=f"ctx-{title}")
-    st.markdown(f"**{Config.GEMINI_MODEL} — LLM-as-judge**")
-    st.slider("Context precision", 0.0, 1.0, float(metrics["context_precision"]), disabled=True, key=f"p-{title}")
-    st.slider("Faithfulness / groundedness", 0.0, 1.0, float(metrics["faithfulness"]), disabled=True, key=f"f-{title}")
+    st.markdown("**Live Ragas performance**")
+    render_metric_bars(metrics)
+    with st.expander("Grounded answer the judge scored", expanded=False):
+        st.write(metrics.get("answer", ""))
     st.info(metrics["reasoning"])
 
 
@@ -142,9 +198,9 @@ with st.sidebar:
     sidebar_key = st.text_input("Google AI Studio key", type="password", help="Session only. Not written to disk.")
     active_key = sidebar_key.strip() or Config.GEMINI_API_KEY
     if active_key:
-        st.caption("Gemini judge is live.")
+        st.caption("Ragas + Gemini judge is live.")
     else:
-        st.warning("No Gemini key. Judge will simulate scores.")
+        st.warning("No Gemini key. Ragas will use fallback estimates.")
 
 legend_l, legend_r = st.columns(2)
 with legend_l:
@@ -176,8 +232,19 @@ if run:
     gateway = retriever.retrieve_deterministic_gateway(query)
     latency_b = (time.perf_counter() - start_b) * 1000
 
-    metrics_a = RagasEvaluator.evaluate(query, broker["context"], active_key)
-    metrics_b = RagasEvaluator.evaluate(query, gateway["context"], active_key)
+    with st.spinner("Running Ragas metrics (Gemini judge)…"):
+        metrics_a = RagasEvaluator.evaluate(
+            query,
+            broker["context"],
+            context_list=broker.get("context_list"),
+            api_key=active_key,
+        )
+        metrics_b = RagasEvaluator.evaluate(
+            query,
+            gateway["context"],
+            context_list=gateway.get("context_list"),
+            api_key=active_key,
+        )
 
     st.session_state["last_run"] = {
         "query": query,

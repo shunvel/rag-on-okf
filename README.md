@@ -15,6 +15,7 @@ License: [MIT](LICENSE)
 - [Two pipelines on one query](#two-pipelines-on-one-query)
 - [Why it exists](#why-it-exists)
 - [Architecture](#architecture)
+- [Ragas evaluation (Gemini judge)](#ragas-evaluation-gemini-judge)
 - [Trade-off: Semantic Broker vs Deterministic Gateway](#trade-off-semantic-broker-vs-deterministic-gateway)
 - [Demo queries](#demo-queries)
 - [Tech stack](#tech-stack)
@@ -37,7 +38,7 @@ License: [MIT](LICENSE)
 | **RAG first, then OKF** | Semantic Broker | Hybrid search → OKF intercept |
 | **OKF first, then RAG** | Deterministic Gateway | Alias / tag route → hybrid search only on miss |
 
-Each path builds a **prompt context window**. A **Gemini 3.8 Flash** (`gemini-3.8-flash`) LLM-as-judge scores both windows for **context precision** and **faithfulness**. **Docker Qdrant** stores the catalog; **dense vectors + BM25** are fused with **Reciprocal Rank Fusion (RRF)**.
+Each path builds a **prompt context window**. **[Ragas](https://github.com/explodinggradients/ragas)** scores both windows with **context precision (without reference)**, **faithfulness**, and **answer relevancy**, using **Gemini 3.8 Flash** (`gemini-3.8-flash`) as the judge LLM via Google’s **OpenAI-compatible API**. **Docker Qdrant** stores the catalog; **dense vectors + BM25** are fused with **Reciprocal Rank Fusion (RRF)**.
 
 The catalog is a small **SaaS finance** knowledge base: canonical OKF metric nodes (NRC, MRR, CAC, ARPU) next to Slack threads, tickets, and warehouse snapshots that **contradict** official formulas. That tension is what the demo is designed to surface.
 
@@ -49,9 +50,13 @@ The catalog is a small **SaaS finance** knowledge base: canonical OKF metric nod
 
 ![Enterprise Knowledge Retrieval Lab — header, pattern legend, and query bar](assets/01-hero.png)
 
-**Side-by-side result** — query *“Show me the formula for NRC”*: Gateway resolves the alias in **~0.5 ms** (search bypassed); Broker pays **~100 ms** for hybrid search before intercepting the same OKF node. Traces, context, and judge scores are visible together.
+**Side-by-side result** — query *“Show me the formula for NRC”*: Gateway resolves the alias in **~0.5 ms** (search bypassed); Broker pays **~100 ms** for hybrid search before intercepting the same OKF node. **Dual-track stream logs** (expandable) show Qdrant hybrid search vs dictionary hit; the Gateway column shows the latency delta (e.g. **-118 ms vs Broker**).
 
-![Semantic Broker vs Deterministic Gateway](assets/03-columns.png)
+![Latency, dual-track stream logs, and side-by-side pipelines](assets/06-latency-stream-logs.png)
+
+**Live Ragas performance** — color-coded bars for context precision, faithfulness, and answer relevancy; engine badge shows **Ragas · gemini-3.8-flash** when the judge runs live (or **fallback estimate** when offline / no key).
+
+![Live Ragas metric bars and prompt context](assets/07-ragas-performance.png)
 
 **Pipeline flow** — bright boxes ran; grey boxes were skipped (Gateway skips Qdrant on a name hit).
 
@@ -67,8 +72,8 @@ The catalog is a small **SaaS finance** knowledge base: canonical OKF metric nod
 
 ```text
                     ┌─────────────────────────────────────────┐
-  User query ───────┤  Semantic Broker (search → intercept)   ├── Gemini judge
-                    │  Deterministic Gateway (route → RAG)    ├── Gemini judge
+  User query ───────┤  Semantic Broker (search → intercept)   ├── Ragas + Gemini judge
+                    │  Deterministic Gateway (route → RAG)    ├── Ragas + Gemini judge
                     └──────────────┬──────────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
@@ -118,12 +123,45 @@ People still do not speak schema. They type *“money lost when people leave us.
 | `data/saas_financial_market.csv` | Warehouse-style rows (values, not definitions) |
 | `data/financial_qa.json` | Preset queries and “why this preset” hints |
 | Qdrant + BM25 | Hybrid discovery; RRF: `1/(60 + rank_vector) + 1/(60 + rank_BM25)` |
-| `src/evaluator.py` | Gemini judge JSON: `context_precision`, `faithfulness`, `reasoning` |
+| `src/evaluator.py` | Ragas metrics (`context_precision`, `faithfulness`, `answer_relevancy`) + heuristic fallback |
 | `app_ui.py` | Side-by-side lab, D3 flow charts, neighbor table |
 
 **Indexing.** Collection `saas_enterprise_catalog` on `localhost:6343` (host port maps to container `6333` to avoid clashing with other local Qdrant). Seeding is **idempotent**: reruns scroll payloads and rebuild BM25 without re-embedding everything.
 
-**Embeddings.** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions).
+**Embeddings (retrieval).** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions) for Qdrant hybrid search.
+
+---
+
+## Ragas evaluation (Gemini judge)
+
+After each pipeline assembles its **prompt context**, the lab runs **[Ragas](https://github.com/explodinggradients/ragas) 0.4** metrics on both sides. This is real Ragas (not a hand-rolled JSON prompt): collection metrics from `ragas.metrics.collections`.
+
+| Metric | What it measures |
+| --- | --- |
+| **Context precision (without reference)** | Whether each retrieved chunk was useful for the grounded answer |
+| **Faithfulness** | Whether claims in the answer are supported by retrieved context |
+| **Answer relevancy** | Whether the answer addresses the user question (uses embeddings + LLM) |
+
+**Judge backend.** One [`openai`](https://github.com/openai/openai-python) **`AsyncOpenAI`** client points at Google’s **OpenAI-compatible** base URL (`GEMINI_OPENAI_BASE_URL`, default `https://generativelanguage.googleapis.com/v1beta/openai/`). Ragas 0.4 collection metrics call `ascore()` / `agenerate()`, so the client must be async (sync `OpenAI` triggers “Cannot use agenerate() with a synchronous client”).
+
+1. **Grounded answer** — chat completion with `GEMINI_MODEL` (`gemini-3.8-flash`) from context only.
+2. **Ragas LLM** — `llm_factory(..., client=client)` for metric prompts.
+3. **Ragas embeddings** — `ragas.embeddings.OpenAIEmbeddings(client=client, model=GEMINI_EMBED_MODEL)` for answer relevancy. The API base URL is set on the **client only** (not passed into embedding constructors).
+
+Default embedding model: **`gemini-embedding-001`** (works on the Gemini OpenAI-compat embed endpoint).
+
+**Inputs.** Retriever returns `context_list` (per-chunk blocks) plus the joined `context` string so Ragas sees the same chunks the pipeline kept.
+
+**UI.**
+
+- **Dual-track stream log** — expandable trace with icons (Qdrant hybrid vs dictionary hit, graph crawl, warehouse, Slack noise).
+- **Live Ragas performance** — color-coded bars (green ≥ 0.8, amber ≥ 0.5, red below) and an **engine badge**: `Ragas · gemini-3.8-flash (Gemini OpenAI-compat)` vs grey **fallback estimate**.
+- **Grounded answer the judge scored** — the response Ragas evaluated.
+- **Latency** on each column is **retrieval only** (judge time is excluded so OKF bypass comparisons stay honest).
+
+**Fallback estimate.** If there is no `GEMINI_API_KEY`, `USE_RAGAS=0`, or the API fails (including **429 quota** or **503 overload**), the UI keeps working with local heuristic scores and explains why in the info panel.
+
+**Import shim.** [`src/ragas_bootstrap.py`](src/ragas_bootstrap.py) patches a missing `langchain_community.chat_models.vertexai` module so Ragas imports cleanly on current `langchain-community` 0.4.x.
 
 ---
 
@@ -161,7 +199,8 @@ Production systems often **compose both**: Gateway for ticker language, Broker f
 - **Streamlit** — dashboard
 - **Qdrant** (`docker-compose`) — vector store
 - **rank-bm25** — sparse retrieval
-- **google-genai** — Gemini judge
+- **ragas** — retrieval evaluation metrics (Gemini judge via OpenAI-compat endpoint)
+- **openai** + **langchain-openai** — Gemini judge client for Ragas
 - **D3.js** (via `streamlit.components`) — pipeline flow and RRF explanation charts
 
 ---
@@ -181,7 +220,8 @@ rag-on-okf/
     ├── config.py
     ├── database.py           # KnowledgeStore, hybrid + RRF
     ├── retriever.py          # Broker + Gateway
-    ├── evaluator.py          # Gemini judge + local fallback
+    ├── evaluator.py          # Ragas + Gemini judge + local fallback
+    ├── ragas_bootstrap.py    # import shim for ragas on langchain-community 0.4.x
     └── visualize.py          # D3 HTML helpers
 ```
 
@@ -230,8 +270,11 @@ Qdrant dashboard: [http://localhost:6343/dashboard](http://localhost:6343/dashbo
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | *(empty)* | Google AI Studio key for live judge |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Judge model; avoid `gemini-2.5-flash` (404 on new keys) |
+| `GEMINI_API_KEY` | *(empty)* | Google AI Studio key for live Ragas + grounded answer |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Chat judge for answer + Ragas LLM; avoid `gemini-2.5-flash` (404 on new keys) |
+| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | Ragas answer-relevancy embeddings (same OpenAI-compat client) |
+| `GEMINI_OPENAI_BASE_URL` | *(in code)* | `https://generativelanguage.googleapis.com/v1beta/openai/` — set in [`src/config.py`](src/config.py) |
+| `USE_RAGAS` | `1` | Set to `0` to force local fallback scores (no Ragas API calls) |
 | `QDRANT_HOST` | `localhost` | Qdrant host |
 | `QDRANT_PORT` | `6343` | Host port mapped in `docker-compose.yml` |
 
@@ -266,7 +309,8 @@ Output is written to `assets/`. Ensure the sidebar key field stays empty when ca
 - Qdrant: `collection_exists` / `create_collection` / `delete_collection` (not deprecated `recreate_collection`).
 - Vector query: `query_points` (not deprecated `search`).
 - Alias matching is phrase-aware (`net revenue churn`), not single-token equality.
-- Judge: retries and model fallback on transient `503`; local simulation when no key or overload.
+- Ragas 0.4 collection metrics; Gemini chat + `gemini-embedding-001` via one OpenAI-compat client (`OpenAIEmbeddings` uses the client’s `base_url`, not a separate `base_url` kwarg).
+- Fallback estimate when `USE_RAGAS=0`, no key, 429 quota, 503 overload, or other judge errors.
 - Streamlit: `.streamlit/config.toml` uses polled file watching to avoid torch/transformers watcher noise.
 
 ---

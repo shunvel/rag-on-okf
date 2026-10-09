@@ -1,94 +1,165 @@
 from __future__ import annotations
 
-import json
-import time
+import asyncio
+import math
+from functools import lru_cache
 from typing import Any
 
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 
 from src.config import Config
+from src.ragas_bootstrap import ensure_ragas_importable
 
-EVAL_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "context_precision": {"type": "NUMBER"},
-        "faithfulness": {"type": "NUMBER"},
-        "reasoning": {"type": "STRING"},
-    },
-    "required": ["context_precision", "faithfulness", "reasoning"],
-}
 
-# Same Flash family as Config.GEMINI_MODEL. Do not use gemini-2.5-flash (404 for new keys)
-# or gemini-flash-latest (alias that 503s under load).
+@lru_cache(maxsize=4)
+def _judge_bundle(api_key: str, model: str) -> tuple[Any, Any, AsyncOpenAI]:
+    ensure_ragas_importable()
+    from ragas.embeddings import OpenAIEmbeddings
+    from ragas.llms.base import llm_factory
+
+    # Ragas 0.4 collection metrics use ascore() / agenerate() — requires async client.
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=Config.GEMINI_OPENAI_BASE_URL,
+    )
+    llm = llm_factory(model, provider="openai", client=client, temperature=0)
+    embeddings = OpenAIEmbeddings(client=client, model=Config.GEMINI_EMBED_MODEL)
+    return llm, embeddings, client
+
+
+async def _generate_answer(client: AsyncOpenAI, model: str, query: str, context: str) -> str:
+    if not context.strip():
+        return "No retrieved context was available, so no grounded answer can be produced."
+    prompt = (
+        "Answer the user question using ONLY the retrieved context below. "
+        "If the context is insufficient, say so briefly.\n\n"
+        f"Question: {query}\n\nContext:\n{context[:8000]}"
+    )
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+async def _score_with_ragas(
+    query: str,
+    answer: str,
+    context_list: list[str],
+    llm: Any,
+    embeddings: Any,
+) -> dict[str, float]:
+    from ragas.metrics.collections import (
+        AnswerRelevancy,
+        ContextPrecisionWithoutReference,
+        Faithfulness,
+    )
+
+    contexts = [c for c in context_list if c.strip()] or [""]
+    faith = await Faithfulness(llm=llm).ascore(
+        user_input=query,
+        response=answer,
+        retrieved_contexts=contexts,
+    )
+    relevancy = await AnswerRelevancy(llm=llm, embeddings=embeddings, strictness=2).ascore(
+        user_input=query,
+        response=answer,
+    )
+    precision = await ContextPrecisionWithoutReference(llm=llm).ascore(
+        user_input=query,
+        response=answer,
+        retrieved_contexts=contexts,
+    )
+    return {
+        "faithfulness": _safe_float(faith.value),
+        "answer_relevancy": _safe_float(relevancy.value),
+        "context_precision": _safe_float(precision.value),
+    }
+
+
+async def _evaluate_live(
+    query: str,
+    context: str,
+    blocks: list[str],
+    api_key: str,
+    model: str,
+) -> dict[str, Any]:
+    llm, embeddings, client = _judge_bundle(api_key, model)
+    answer = await _generate_answer(client, model, query, context)
+    scores = await _score_with_ragas(query, answer, blocks, llm, embeddings)
+    return {
+        **scores,
+        "answer": answer,
+        "engine": f"Ragas · {model} (Gemini OpenAI-compat)",
+        "reasoning": (
+            "Scores from Ragas metrics: context precision (without reference), "
+            "faithfulness, and answer relevancy — judged with Gemini via the OpenAI-compatible API."
+        ),
+    }
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(out) or math.isinf(out):
+        return 0.0
+    return max(0.0, min(1.0, out))
+
+
+def _run_async(coro: Any) -> Any:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    # Streamlit may already have a loop; run in a fresh loop on a worker thread.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 class RagasEvaluator:
     @staticmethod
-    def evaluate(query: str, context: str, api_key: str) -> dict[str, Any]:
-        if not api_key:
-            return RagasEvaluator._simulate(context, reason="No Gemini key. Using local estimate.")
+    def evaluate(
+        query: str,
+        context: str,
+        context_list: list[str] | None = None,
+        api_key: str = "",
+    ) -> dict[str, Any]:
+        # Back-compat: evaluate(query, context, api_key) when the third arg was the key.
+        if isinstance(context_list, str) and not api_key:
+            api_key = context_list
+            context_list = None
 
-        grounded_answer = RagasEvaluator._answer_from_context(context)
-        prompt = f"""
-You are an objective retrieval evaluator. Score the retrieved context, not the user's opinions.
+        blocks = context_list if context_list else ([context] if context.strip() else [])
+        if not api_key or not Config.USE_RAGAS:
+            reason = "No Gemini key. Using local estimate." if not api_key else "USE_RAGAS=0. Using local estimate."
+            return RagasEvaluator._simulate(context, reason=reason)
 
-USER QUERY: {query}
-
-RETRIEVED CONTEXT:
-{context}
-
-GROUNDED ANSWER DRAFTED FROM CONTEXT ONLY:
-{grounded_answer}
-
-Return floats between 0.0 and 1.0:
-1. context_precision: high (0.9-1.0) if the context is canonical OKF structure (formulas, resource URIs, explicit metric names) that answers the query. Lower if Slack/tickets/warehouse snapshots pollute or dominate.
-2. faithfulness: 1.0 if every claim in the grounded answer is supported by the retrieved context. Penalize invented details.
-
-Respond with JSON only.
-"""
-        models = list(dict.fromkeys([Config.GEMINI_MODEL, *Config.GEMINI_FALLBACK_MODELS]))
-        client = genai.Client(api_key=api_key)
-        last_error = None
-
-        for model in models:
-            for attempt in range(3):
-                try:
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=0.0,
-                            response_mime_type="application/json",
-                            response_json_schema=EVAL_SCHEMA,
-                        ),
-                    )
-                    payload = json.loads(response.text or "{}")
-                    return {
-                        "context_precision": float(payload.get("context_precision", 0.0)),
-                        "faithfulness": float(payload.get("faithfulness", 0.0)),
-                        "reasoning": str(payload.get("reasoning", "")),
-                    }
-                except Exception as exc:
-                    last_error = exc
-                    message = str(exc)
-                    if "503" in message or "UNAVAILABLE" in message or "high demand" in message.lower():
-                        time.sleep(1.2 * (attempt + 1))
-                        continue
-                    if "404" in message or "NOT_FOUND" in message:
-                        break
-                    time.sleep(0.4)
-                    continue
-
-        simulated = RagasEvaluator._simulate(
-            context,
-            reason=(
-                "Gemini 3.8 Flash is overloaded (HTTP 503 high demand). "
-                "Showing a local precision estimate so the comparison still works. Retry the run in a moment. "
-                f"Last API error: {last_error}"
-            ),
-        )
-        return simulated
+        model = Config.GEMINI_MODEL
+        try:
+            return _run_async(_evaluate_live(query, context, blocks, api_key, model))
+        except Exception as exc:
+            message = str(exc)
+            if "429" in message or "quota" in message.lower() or "RESOURCE_EXHAUSTED" in message:
+                reason = (
+                    "Gemini quota or rate limit hit (HTTP 429). Showing a local estimate until quota resets. "
+                    f"Last error: {exc}"
+                )
+            elif "503" in message or "UNAVAILABLE" in message or "high demand" in message.lower():
+                reason = (
+                    "Gemini is overloaded (HTTP 503). Showing a local precision estimate. "
+                    "Retry the run in a moment. "
+                    f"Last error: {exc}"
+                )
+            else:
+                reason = f"Ragas evaluation failed; using local estimate. Last error: {exc}"
+            simulated = RagasEvaluator._simulate(context, reason=reason)
+            simulated["answer"] = RagasEvaluator._answer_from_context(context)
+            return simulated
 
     @staticmethod
     def _answer_from_context(context: str) -> str:
@@ -103,8 +174,12 @@ Respond with JSON only.
         polluted = "[UNSTRUCTURED LOG CHUNK]" in context
         precision = 0.96 if is_okf and not polluted else (0.72 if is_okf else 0.38)
         faithfulness = 0.97 if is_okf else 0.58
+        answer_relevancy = 0.85 if is_okf else 0.55
         return {
             "context_precision": precision,
             "faithfulness": faithfulness,
+            "answer_relevancy": answer_relevancy,
+            "answer": RagasEvaluator._answer_from_context(context),
+            "engine": "fallback estimate",
             "reasoning": reason,
         }

@@ -17,6 +17,9 @@ class Config:
         "gemini-3.5-flash",
         "gemini-3.1-flash-lite",
     )
+    GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
+    USE_RAGAS = os.getenv("USE_RAGAS", "1") == "1"
     OKF_BUNDLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../okf_bundle"))
     DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data"))
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
