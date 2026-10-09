@@ -1,0 +1,7 @@
+[server]
+fileWatcherType = "poll"
+folderWatchBlacklist = [".venv", ".git"]
+headless = true
+
+[browser]
+gatherUsageStats = false

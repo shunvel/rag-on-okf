@@ -1,0 +1,1 @@
+"""OKF Enterprise Knowledge Gateway."""

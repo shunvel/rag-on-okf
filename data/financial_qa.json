@@ -1,0 +1,50 @@
+[
+  {
+    "id": "qa-nrc-formula",
+    "question": "How do we write a query for our NRC metrics?",
+    "answer": "Use (Lost MRR - Expansion MRR) / Starting MRR from bigquery://prod.finance.mrr_table.",
+    "metric": "nrc"
+  },
+  {
+    "id": "qa-nrc-paraphrase",
+    "question": "What does money lost when accounts leave mean?",
+    "answer": "That paraphrase maps to Net Revenue Churn, not gross logo churn.",
+    "metric": "nrc"
+  },
+  {
+    "id": "qa-nrc-short",
+    "question": "Show me the formula for NRC",
+    "answer": "NRC = (Lost MRR - Expansion MRR) / Starting MRR.",
+    "metric": "nrc"
+  },
+  {
+    "id": "qa-cac",
+    "question": "Show me how to compute CAC attribution",
+    "answer": "CAC = Total Sales & Marketing Spend / New Customers Acquired from postgres://prod.marketing.attribution_ledger.",
+    "metric": "cac"
+  },
+  {
+    "id": "qa-mrr",
+    "question": "How should we normalize monthly recurring revenue?",
+    "answer": "Normalize contracts to monthly and join billing adjustments.",
+    "metric": "mrr"
+  },
+  {
+    "id": "qa-arpu",
+    "question": "What is the official ARPU definition?",
+    "answer": "ARPU = MRR / Paying Customers. Do not use registered-user counts.",
+    "metric": "arpu"
+  },
+  {
+    "id": "qa-billing-noise",
+    "question": "Show me common subscription billing errors",
+    "answer": "Operational tickets describe double billing and warehouse anomalies; they are not metric definitions.",
+    "metric": null
+  },
+  {
+    "id": "qa-churn-mixup",
+    "question": "Should we report gross churn instead of net revenue churn?",
+    "answer": "No. Canonical finance reporting uses NRC, not gross churn.",
+    "metric": "nrc"
+  }
+]

@@ -1,0 +1,34 @@
+[
+  {
+    "id": 101,
+    "text": "Slack thread from John: I think we should calculate gross churn because Net revenue churn metrics are too hard to compute in SQL. Just use cancelled logos over starting logos."
+  },
+  {
+    "id": 102,
+    "text": "Support Ticket #4022: Finance user complained about active subscription double billing anomalies inside our data warehouse. Please refund and close."
+  },
+  {
+    "id": 103,
+    "text": "Slack thread: John believes our CAC calculations are skewed because direct signups are leaking into paid acquisition vectors. He wants to count organic users in the denominator to make CAC look cheaper."
+  },
+  {
+    "id": 104,
+    "text": "Support Ticket #9011: Audit log flagged an issue with gross churn calculations being mixed up with Net Revenue Churn formulas on the exec deck."
+  },
+  {
+    "id": 105,
+    "text": "Engineering note: Internal BigQuery paths to parse subscription data are locked under production database attribution metrics. Use whoever has access; definition TBD."
+  },
+  {
+    "id": 106,
+    "text": "Customer ticket #8810: Billing errors on mid-month upgrades. Agent suggested we just average last invoice and call it MRR."
+  },
+  {
+    "id": 107,
+    "text": "All-hands transcript: Someone said ARPU is total GAAP revenue divided by every registered user including free-tier accounts."
+  },
+  {
+    "id": 108,
+    "text": "PagerDuty follow-up: warehouse snapshot job duplicated February MRR rows. Finance should ignore the spike until we backfill, but the Slack poll voted to keep the inflated number."
+  }
+]

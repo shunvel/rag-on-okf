@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+qdrant_data/
+.streamlit/secrets.toml
+.DS_Store
+*.log
+.idea/
+.vscode/
